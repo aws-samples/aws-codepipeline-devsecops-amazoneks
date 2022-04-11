@@ -1,0 +1,659 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: CFN Template to deploy CodePipeline to build Docker Image of java application and push to ECR and deploy to EKS
+
+Parameters:
+  SourceRepoName:
+    Type: String
+    Description: AWS CodeCommit RepoName where code resides
+  CodeBranchName:
+    Type: String
+    Default: main
+    Description: Branch Name
+  EKSClusterName:
+    Type: String
+    Description: EKS Cluster Name (Not EKS Cluster ID)
+  EKSCodeBuildAppName:
+    Type: String
+    Default: aws-proserve-java-greeting
+    Description: Name of the application
+  EnvType:
+    Type: String
+    Default: dev
+    Description: Environment Type
+  EcrDockerRepository:
+    Type: String
+    Description: ECR Docker Repositry Name
+  EmailRecipient:
+    Type: String
+    Default: mahrag@amazon.com
+    Description: Email Address for Build Notifications
+  EKSWorkerNodeRoleName:
+    Type: CommaDelimitedList
+    Description: Names of existing EKS worker node role(s) you want to add to the newly created Managed Policy of CodeGuru profiler
+  EKSWorkerNodeRoleARN:
+    Type: String
+    Description: ARN of EKS Worker node role(s) to allow Codeguru profiler Config Agent to send profiling data
+
+Resources:
+
+  MySecurityHub:
+    Type: 'AWS::SecurityHub::Hub'
+    Properties:
+      Tags:
+        Name: MySecurityHub
+        Purpose: Security
+
+  SourceRepositoryAssociation:
+    Type: AWS::CodeGuruReviewer::RepositoryAssociation
+    Properties:
+      Name: !Ref SourceRepoName
+      Type: CodeCommit
+
+  MyProfilingGroup:
+    Type: AWS::CodeGuruProfiler::ProfilingGroup
+    Properties:
+      ProfilingGroupName: "MyProfilingGroup"
+      ComputePlatform: "Default"
+      AgentPermissions:
+        Principals:
+          - !Ref EKSWorkerNodeRoleARN
+
+  BuildPipelineSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+      TopicName:
+        Fn::Sub: PipelineSNSTopic-${AWS::StackName}
+
+  BuildPipelineSNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref EmailRecipient
+      Protocol: email
+      TopicArn: !Ref 'BuildPipelineSNSTopic'
+
+  BuildPipelineSnsPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [ !Ref BuildPipelineSNSTopic ]
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Id": "__default_policy_ID",
+          "Statement": [
+            {
+              "Sid": "__default_statement_ID",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": "*"
+              },
+              "Action": [
+                "SNS:GetTopicAttributes",
+                "SNS:SetTopicAttributes",
+                "SNS:AddPermission",
+                "SNS:RemovePermission",
+                "SNS:DeleteTopic",
+                "SNS:Subscribe",
+                "SNS:ListSubscriptionsByTopic",
+                "SNS:Publish",
+                "SNS:Receive"
+              ],
+              "Resource": "${BuildPipelineSNSTopic}",
+              "Condition": {
+                "StringEquals": {
+                  "AWS:SourceOwner": "${AWS::AccountId}"
+                }
+              }
+            },
+            {
+              "Sid": "Allow Events",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "events.amazonaws.com"
+              },
+              "Action": "sns:Publish",
+              "Resource": "${BuildPipelineSNSTopic}"
+            }
+          ]
+        }
+
+  CodeBuildImageStateEventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Rule for sending code buildimage project notifications to SNS topic"
+      EventPattern:
+        source:
+          - "aws.codebuild"
+        detail-type:
+          - "CodeBuild Build State Change"
+        detail:
+          project-name:
+            - !Sub 'Build-${AWS::StackName}'
+          build-status:
+            - "FAILED"
+            - "SUCCEEDED"
+            - "IN_PROGRESS"
+            - "STOPPED"
+      State: "ENABLED"
+      Targets:
+        - Arn: !Ref BuildPipelineSNSTopic
+          Id: CodeBuildNotificationTest
+          InputTransformer:
+            InputPathsMap:
+              build-id: "$.detail.build-id"
+              project-name: "$.detail.project-name"
+              build-status: "$.detail.build-status"
+              account: "$.account"
+              region: "$.region"
+              time: "$.time"
+              resourcesarn: "$.resources"
+              deep-link: "$.detail.additional-information.logs.deep-link"
+            InputTemplate: |
+              {
+                 "buildStatus": "Build has reached status of <build-status> at <time>",
+                 "buildID" : <build-id>,
+                 "buildProject": <project-name>,
+                 "buildProjectArn": <resourcesarn>,
+                 "awsAccount": <account>,
+                 "awsRegion": <region>,
+                 "buildLogs": <deep-link>
+              }
+    DependsOn: [ "CodeBuildImageProject" ]
+
+  CodeDeployImageStateEventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Rule for sending code deploy image project notifications to SNS topic"
+      EventPattern:
+        source:
+          - "aws.codebuild"
+        detail-type:
+          - "CodeBuild Build State Change"
+        detail:
+          project-name:
+            - !Sub 'Deploy-${AWS::StackName}'
+          build-status:
+            - "FAILED"
+            - "SUCCEEDED"
+            - "IN_PROGRESS"
+            - "STOPPED"
+      State: "ENABLED"
+      Targets:
+        - Arn: !Ref BuildPipelineSNSTopic
+          Id: CodeBuildNotificationTest
+          InputTransformer:
+            InputPathsMap:
+              build-id: "$.detail.build-id"
+              project-name: "$.detail.project-name"
+              build-status: "$.detail.build-status"
+              account: "$.account"
+              region: "$.region"
+              time: "$.time"
+              resourcesarn: "$.resources"
+              deep-link: "$.detail.additional-information.logs.deep-link"
+            InputTemplate: |
+              {
+                 "buildStatus": "Build has reached status of <build-status> at <time>",
+                 "buildID" : <build-id>,
+                 "buildProject": <project-name>,
+                 "buildProjectArn": <resourcesarn>,
+                 "awsAccount": <account>,
+                 "awsRegion": <region>,
+                 "buildLogs": <deep-link>
+              }
+    DependsOn: [ "CodeDeployImageProject" ]
+
+  CodePipelineStateEventRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Rule for sending codepipeline notifications to SNS topic"
+      EventPattern:
+        source:
+          - "aws.codepipeline"
+        detail-type:
+          - "CodePipeline Pipeline Execution State Change"
+        detail:
+          pipeline:
+            - !Sub 'Pipeline-${AWS::StackName}'
+          state:
+            - "CANCELED"
+            - "SUCCEEDED"
+            - "STARTED"
+            - "STOPPED"
+            - "RESUMED"
+            - "STOPPING"
+            - "SUPERSEDED"
+      State: "ENABLED"
+      Targets:
+        - Arn: !Ref BuildPipelineSNSTopic
+          Id: CodePipelineNotificationTest
+          InputTransformer:
+            InputPathsMap:
+              pipeline: "$.detail.pipeline"
+              state: "$.detail.state"
+              account: "$.account"
+              region: "$.region"
+              time: "$.time"
+              resourcesarn: "$.resources"
+            InputTemplate: |
+              {
+                 "pipelineStatus": "Pipeline <pipeline> has reached state of <state> at <time>",
+                 "pipelineArn": <resourcesarn>,
+                 "awsAccount": <account>,
+                 "awsRegion": <region>
+              }
+    DependsOn: [ "CodePipelineCodeCommit" ]
+
+  CodePipelineArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CodePipelineArtifactBucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketVersioning
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}
+              - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+            Principal:
+              AWS:
+                - !GetAtt [CodePipelineServiceRole,Arn]
+                - !GetAtt [CodeBuildServiceRole,Arn]
+                - !GetAtt [EksCodeBuildkubeRole,Arn]
+
+  CodeGuruProfilerManagedPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: SendProfilingDataToCodeGuruProfiler
+            Effect: Allow
+            Action:
+              - 'codeguru-profiler:ConfigureAgent'
+              - 'codeguru-profiler:CreateProfilingGroup'
+              - 'codeguru-profiler:PostAgentProfile'
+            Resource: !GetAtt MyProfilingGroup.Arn
+      Roles: !Ref 'EKSWorkerNodeRoleName'
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+    #  RoleName:
+    #    Fn::Sub: CodePipelineServiceRole-${AWS::StackName}
+      Path: /service-role/
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codepipeline-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+#              - Resource: "*"
+#                Effect: Allow
+#                Action:
+#                  - codebuild:StartBuild
+#                  - codebuild:BatchGetBuilds
+#                  - codebuild:BatchGetBuildBatches
+#                  - codebuild:StartBuildBatch
+#                  - codecommit:GetBranch
+#                  - codecommit:GetCommit
+#                  - codecommit:GetRepository
+#                  - codecommit:UploadArchive
+#                  - codecommit:GetUploadArchiveStatus
+#                  - codecommit:CancelUploadArchive
+#                  - ecr:DescribeImages
+#                  - iam:PassRole
+#                  - codeguru-reviewer:*
+#                  - securityhub:*
+              - Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepoName}
+                Effect: Allow
+                Action:
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:ListRepositories
+                  - codecommit:GetRepository
+                  - codecommit:UploadArchive
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:CancelUploadArchive
+              - Resource:
+                  - !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CodeBuildImageProject}
+                  - !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CodeDeployImageProject}
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - codebuild:BatchGetBuildBatches
+                  - codebuild:StartBuildBatch
+              - Resource: !GetAtt SourceRepositoryAssociation.AssociationArn
+                Effect: Allow
+                Action:
+                  - codeguru-reviewer:List*
+                  - codeguru-reviewer:Describe*
+                  - codeguru-reviewer:Get*
+                  - codeguru:Get*
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepository}
+                Effect: Allow
+                Action:
+                  - ecr:DescribeImages
+              - Resource: !Ref MySecurityHub
+                Effect: Allow
+                Action:
+                  - securityhub:Get*
+                  - securityhub:List*
+                  - securityhub:Describe*
+                  - config:DescribeConfigurationRecorders
+                  - config:DescribeConfigurationRecorderStatus
+                  - config:DescribeConfigRules
+                  - config:BatchGetResourceConfig
+                  - config:SelectResourceConfig
+                  - config:PutEvaluations
+                  - logs:DescribeMetricFilters
+                  - cloudtrail:DescribeTrails
+                  - cloudtrail:GetTrailStatus
+                  - cloudtrail:GetEventSelectors
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:DescribeAlarmsForMetric
+                  - iam:GenerateCredentialReport
+                  - iam:GetCredentialReport
+              - Resource: !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+    DependsOn: CodePipelineArtifactBucket
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+    #  RoleName:
+    #    Fn::Sub: CodeBuildServiceRole-${AWS::StackName}
+      Path: /service-role/
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codebuild-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: arn:aws:logs:*:*:*
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+              - Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepoName}
+                Effect: Allow
+                Action:
+                  - codecommit:GitPull
+              - Resource: !GetAtt SourceRepositoryAssociation.AssociationArn
+                Effect: Allow
+                Action:
+                  - codeguru-reviewer:List*
+                  - codeguru-reviewer:Describe*
+                  - codeguru-reviewer:Get*
+                  - codeguru:Get*
+              - Resource: !Ref MySecurityHub
+                Effect: Allow
+                Action:
+                  - securityhub:Get*
+                  - securityhub:List*
+                  - securityhub:Describe*
+                  - config:DescribeConfigurationRecorders
+                  - config:DescribeConfigurationRecorderStatus
+                  - config:DescribeConfigRules
+                  - config:BatchGetResourceConfig
+                  - config:SelectResourceConfig
+                  - config:PutEvaluations
+                  - logs:DescribeMetricFilters
+                  - cloudtrail:DescribeTrails
+                  - cloudtrail:GetTrailStatus
+                  - cloudtrail:GetEventSelectors
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:DescribeAlarmsForMetric
+                  - iam:GenerateCredentialReport
+                  - iam:GetCredentialReport
+              - Resource: !Sub arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EKSClusterName}
+                Effect: Allow
+                Action:
+                  - eks:DescribeNodegroup
+                  - eks:DescribeUpdate
+                  - eks:DescribeCluster
+              - Resource: !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepository}
+                Effect: Allow
+                Action:
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetAuthorizationToken
+              - Resource: !Sub arn:aws:securityhub:${AWS::Region}::product/aquasecurity/aquasecurity
+                Effect: Allow
+                Action:
+                  - securityhub:BatchImportFindings
+
+  EksCodeBuildkubeRole:
+    Type: AWS::IAM::Role
+    Properties:
+    #  RoleName:
+    #    Fn::Sub: EksCodeBuildkubeRole-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/service-role/${CodeBuildServiceRole}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codebuild-eks-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: !Sub arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EKSClusterName}
+                Effect: Allow
+                Action:
+                  - eks:DescribeNodegroup
+                  - eks:DescribeUpdate
+                  - eks:DescribeCluster
+
+  CodeBuildImageProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Location:
+          Fn::Sub: https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${SourceRepoName}
+        Type: CODEPIPELINE
+        BuildSpec: "buildspec/buildspec.yml"
+      TimeoutInMinutes: 30
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: "aws/codebuild/standard:4.0"
+        PrivilegedMode: True
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref EcrDockerRepository
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: CG_PROFILER_GROUP_NAME
+            Value: !Ref MyProfilingGroup
+      Name:
+        Fn::Sub: Build-${AWS::StackName}
+      ServiceRole:
+        Fn::GetAtt: [ CodeBuildServiceRole, Arn ]
+
+  CodeDeployImageProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Location:
+          Fn::Sub: https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${SourceRepoName}
+        Type: CODEPIPELINE
+        BuildSpec: "buildspec/buildspec_deploy.yml"
+      TimeoutInMinutes: 30
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: "aws/codebuild/standard:4.0"
+        PrivilegedMode: True
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: IMAGE_REPO_NAME
+            Value: !Ref EcrDockerRepository
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: EKS_CLUSTER_NAME
+            Value: !Ref EKSClusterName
+          - Name: EKS_CODEBUILD_ROLE_ARN
+            Value: !GetAtt EksCodeBuildkubeRole.Arn
+          - Name: EKS_CODEBUILD_APP_NAME
+            Value: !Ref EKSCodeBuildAppName
+          - Name: ENV
+            Value: !Ref EnvType
+      Name:
+        Fn::Sub: Deploy-${AWS::StackName}
+      ServiceRole:
+        Fn::GetAtt: [ CodeBuildServiceRole, Arn ]
+
+  CodePipelineCodeCommit:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name:
+        Fn::Sub: Pipeline-${AWS::StackName}
+      RoleArn:
+          Fn::GetAtt: [ CodePipelineServiceRole, Arn ]
+      ArtifactStore:
+        Type: S3
+        Location: !Sub ${CodePipelineArtifactBucket}
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: App
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: 1
+                Provider: CodeCommit
+              Configuration:
+                BranchName: !Ref CodeBranchName
+                RepositoryName:
+                  Ref: SourceRepoName
+              OutputArtifacts:
+                - Name: SourceCodeApp
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildImageProject
+              InputArtifacts:
+                - Name: SourceCodeApp
+              OutputArtifacts:
+                - Name: BuildOutput
+              RunOrder: 2
+        - Name: ApprovalToDeploy
+          Actions:
+            - Name: Approval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Version: 1
+                Provider: Manual
+              Configuration:
+                CustomData: Approval or Reject the build to be deployed on EKS
+              InputArtifacts: []
+              OutputArtifacts: []
+              RunOrder: 3
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeDeployImageProject
+              InputArtifacts:
+                - Name: SourceCodeApp
+              OutputArtifacts:
+                - Name: DeployOutput
+              RunOrder: 4
+    DependsOn: [ "BuildPipelineSNSTopic", "BuildPipelineSNSSubscription" ]
+
+Outputs:
+  HubArn:
+    Description: ARN of AWS Securityhub enabled
+    Value: !Ref MySecurityHub
+  SNSTopic:
+    Description: SNS TopicName
+    Value: !Ref BuildPipelineSNSTopic
+  CodeBuildServiceRoleARN:
+    Description: ARN of CodeBuildservicerole
+    Value: !GetAtt CodeBuildServiceRole.Arn
+  EksCodeBuildkubeRoleARN:
+    Description: ARN of EksCodeBuildkubeRole which will be added in aws-auth configmap for deployment to EKS
+    Value: !GetAtt EksCodeBuildkubeRole.Arn
+  CodePipelineURL:
+    Description: Codepipeline URL for this stack
+    Value:
+      Fn::Join:
+        - ""
+        - - "https://console.aws.amazon.com/codepipeline/home?region="
+          - Ref: AWS::Region
+          - "#/view/"
+          - Ref: CodePipelineCodeCommit
