@@ -15,9 +15,9 @@ Parameters:
   CodeCommitRepositoryS3BucketObjKey:
     Type: String
     Description: S3 ObjectKey, example-if intial code zip file is stored inside S3 bucket in this location code/cicdstack.zip, then this will be value
-  #ECRRepositoryName:
-    #Type: String
-    #Description: Name of ECR repo to be created
+  ECRRepositoryName:
+    Type: String
+    Description: Name of ECR repo to be created
 
 Resources:
   MyRepo:
@@ -57,7 +57,7 @@ Resources:
            ]
          }
       
-      #RepositoryName: !Ref ECRRepositoryName
+      RepositoryName: !Ref ECRRepositoryName
 
 Outputs:
   CodeCommitRepoUrl:

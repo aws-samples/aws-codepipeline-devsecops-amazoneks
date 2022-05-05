@@ -6,11 +6,14 @@
     <version>1.0-SNAPSHOT</version>
     <packaging>war</packaging>
 
+<!--    spring-boot-starter-parent latest version check in apache maven repository -->
+<!--    (https://mvnrepository.com/artifact/org.springframework.boot/spring-boot-starter-parent)-->
+<!--    and update latest accordingly in <version> </version> below to get rid of sec vulnerabilties-->
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
         <version>2.0.5.RELEASE</version>
-<!--        <version>2.6.2</version>-->
+<!--        <version>2.6.7</version>-->
     </parent>
 
     <properties>

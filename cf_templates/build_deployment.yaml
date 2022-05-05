@@ -249,10 +249,24 @@ Resources:
   CodePipelineArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: codeartifact-logs
       BucketEncryption:
         ServerSideEncryptionConfiguration: 
         - ServerSideEncryptionByDefault:
             SSEAlgorithm: AES256
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  LoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
 
@@ -276,6 +290,28 @@ Resources:
                 - !GetAtt [CodePipelineServiceRole,Arn]
                 - !GetAtt [CodeBuildServiceRole,Arn]
                 - !GetAtt [EksCodeBuildkubeRole,Arn]
+
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LoggingBucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:PutObject
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${LoggingBucket}
+              - !Sub arn:aws:s3:::${LoggingBucket}/codeartifact-logs/*
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Condition:
+              ArnLike:
+                'aws:SourceArn':
+                  - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}
+              StringEquals:
+                'aws:SourceAccount':
+                  - !Sub ${AWS::AccountId}
 
   CodeGuruProfilerManagedPolicy:
     Type: 'AWS::IAM::ManagedPolicy'
@@ -310,23 +346,6 @@ Resources:
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-#              - Resource: "*"
-#                Effect: Allow
-#                Action:
-#                  - codebuild:StartBuild
-#                  - codebuild:BatchGetBuilds
-#                  - codebuild:BatchGetBuildBatches
-#                  - codebuild:StartBuildBatch
-#                  - codecommit:GetBranch
-#                  - codecommit:GetCommit
-#                  - codecommit:GetRepository
-#                  - codecommit:UploadArchive
-#                  - codecommit:GetUploadArchiveStatus
-#                  - codecommit:CancelUploadArchive
-#                  - ecr:DescribeImages
-#                  - iam:PassRole
-#                  - codeguru-reviewer:*
-#                  - securityhub:*
               - Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepoName}
                 Effect: Allow
                 Action:
@@ -397,30 +416,17 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Service: codebuild.amazonaws.com
+              Service:
+                - codebuild.amazonaws.com
+                - codepipeline.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
       Policies:
-        - PolicyName: codebuild-access
+        - PolicyName: codebuild-access-1
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              - Resource: arn:aws:logs:*:*:*
-                Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-              - Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepoName}
-                Effect: Allow
-                Action:
-                  - codecommit:GitPull
-              - Resource: !GetAtt SourceRepositoryAssociation.AssociationArn
-                Effect: Allow
-                Action:
-                  - codeguru-reviewer:List*
-                  - codeguru-reviewer:Describe*
-                  - codeguru-reviewer:Get*
-                  - codeguru:Get*
               - Resource: !Ref MySecurityHub
                 Effect: Allow
                 Action:
@@ -441,6 +447,31 @@ Resources:
                   - cloudwatch:DescribeAlarmsForMetric
                   - iam:GenerateCredentialReport
                   - iam:GetCredentialReport
+              - Resource: !Sub arn:aws:securityhub:${AWS::Region}::product/aquasecurity/aquasecurity
+                Effect: Allow
+                Action:
+                  - securityhub:BatchImportFindings
+        - PolicyName: codebuild-access-2
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: arn:aws:logs:*:*:*
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+              - Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepoName}
+                Effect: Allow
+                Action:
+                  - codecommit:GitPull
+              - Resource: !GetAtt SourceRepositoryAssociation.AssociationArn
+                Effect: Allow
+                Action:
+                  - codeguru-reviewer:List*
+                  - codeguru-reviewer:Describe*
+                  - codeguru-reviewer:Get*
+                  - codeguru:Get*
               - Resource: !Sub arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EKSClusterName}
                 Effect: Allow
                 Action:
@@ -466,11 +497,10 @@ Resources:
                   - ecr:UploadLayerPart
                   - ecr:CompleteLayerUpload
                   - ecr:GetAuthorizationToken
-              - Resource: !Sub arn:aws:securityhub:${AWS::Region}::product/aquasecurity/aquasecurity
-                Effect: Allow
-                Action:
-                  - securityhub:BatchImportFindings
-
+#              - Resource: "*"
+#                Effect: Allow
+#                Action:
+#                  - ecr:GetAuthorizationToken
   EksCodeBuildkubeRole:
     Type: AWS::IAM::Role
     Properties:

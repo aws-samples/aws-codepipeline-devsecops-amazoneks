@@ -191,6 +191,8 @@ Run the cloudformation template cf_templates/build_deployment.yaml and give the 
 This will automatically trigger the CodePipeline too.
 Once the cloudformation template cf_templates/build_deployment.yaml executes successfully, go to Outputs tab of Java CICD CF Stack in AWS console and get the value of EksCodeBuildkubeRoleARN (this ARN needs to be added to configmap aws_auth of EKS cluster)
 
+During Cloudformation execution, you will get a email notification to confirm subscription to SNS topic created. You can go ahead and confirm the subscription.
+
 4) Patching aws_auth confmap with EksCodeBuildkubeRoleARN received from step3:
   Launch a terminal/powershell/cmd in your local workstation with aws cli installed and configured with access to EKS cluster in the AWS account.<br/>
   Login to EKS cluster:
