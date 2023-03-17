@@ -1,0 +1,70 @@
+version: 0.2
+phases:
+  install: # Install AWS cli, maven, Trivy
+    runtime-versions:
+      java: latest
+    commands:
+       - apt-get update
+       - apt-get install -y git python3 python3-pip
+       - pip install awscli
+       - curl -o aws-iam-authenticator https://s3.us-west-2.amazonaws.com/amazon-eks/1.21.2/2021-07-05/bin/linux/amd64/aws-iam-authenticator
+       - chmod +x ./aws-iam-authenticator
+       - mkdir -p $HOME/bin && cp ./aws-iam-authenticator $HOME/bin/aws-iam-authenticator && export PATH=$PATH:$HOME/bin
+       - apt-get install -y wget apt-transport-https gnupg lsb-release
+       - wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | tee /usr/share/keyrings/trivy.gpg > /dev/null
+       - echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | tee -a /etc/apt/sources.list.d/trivy.list
+       - apt-get update && apt-get install -y trivy
+
+  pre_build: # Check availability of Maven and it's version, Integration of Aquasecurity with AWS SecurityHub if not enabled
+    commands:
+      - echo -e '\nMaven version:'
+      - mvn --version
+      - trivy --version
+      - python -V
+      - export AQUA_PRODUCT_ARN=$(aws securityhub describe-products --region=$AWS_DEFAULT_REGION | jq -r .Products[].ProductArn | grep aquasecurity)
+      - export AQUA_PRODUCT_SUBSCRIPTION=$(aws securityhub list-enabled-products-for-import --region=$AWS_DEFAULT_REGION | jq -r .ProductSubscriptions[] | grep aquasecurity | awk -F'/' '{print $2}')
+      - | 
+        if [ ! -z $AQUA_PRODUCT_ARN ] && [ "$AQUA_PRODUCT_SUBSCRIPTION" != "aquasecurity" ] ; then 
+          aws securityhub enable-import-findings-for-product --product-arn $AQUA_PRODUCT_ARN --region $AWS_DEFAULT_REGION
+          echo -e "\nEnabling Findings from AquaSecurity to upload to AWS SecurityHub"
+        else
+          echo -e "\nAquasecurity Findings Already Enabled and will be imported to AWS SecurityHub"
+        fi
+      
+  
+  build: # Build Docker image,tag it with the commit sha, Scan the docker image using trivy, push the docker image to ECR
+    commands:
+      - cd code/app && mvn clean package && cd ../..
+      - cd code/app && docker build . -t $IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION --build-arg AWS_CODEGURU_PROFILER_GROUP_NAME=$CG_PROFILER_GROUP_NAME --build-arg AWS_REGION=$AWS_REGION -f Dockerfile && cd ../..
+      - docker tag $IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION
+      - docker tag $IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:latest
+      - AWS_REGION=$AWS_DEFAULT_REGION AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID trivy -d image --no-progress --ignore-unfixed --exit-code 0 --severity MEDIUM,LOW --format template --template "@securityhub/asff.tpl" -o securityhub/report.asff $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION
+      - AWS_REGION=$AWS_DEFAULT_REGION AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID trivy -d image --no-progress --ignore-unfixed --exit-code 0 --severity HIGH,CRITICAL --format template --template "@securityhub/asff.tpl" -o securityhub/report.asff $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION
+#      - $(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION) get-login is now deprecated
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION
+      - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:latest
+  
+  post_build: # Upload Security vulnerabilities found in docker image to AWS SecurityHub in ASFF format
+    commands:
+      - |
+        cat securityhub/report.asff
+        if [ "$(cat securityhub/report.asff | jq -r length)" -eq "0" ]; then
+          echo "No or single vulnerability detected in the image"
+        else
+          echo "Uploading vulnerabilities to AWS SecurityHub"
+          aws securityhub batch-import-findings --findings file://securityhub/report.asff --region=$AWS_DEFAULT_REGION
+        #   if [ "$(cat securityhub/report.asff | jq -r length)" -gt "1" ]; then
+        #     echo -e "\nDocker Image vulnerable, deployment won't happen"
+        #   else
+        #     echo -e "\nAtleast one vulnerability has been found, but as part of demo, going ahead with next stage to deploy"
+        #     aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+        #     docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_RESOLVED_SOURCE_VERSION
+        #     docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:latest
+        #     continue
+        #   fi    
+        fi
+      - bash -c "if [ /"$CODEBUILD_BUILD_SUCCEEDING/" == /"0/" ]; then exit 1; fi"
+cache:
+  paths:
+    - '/root/.m2/**/*'

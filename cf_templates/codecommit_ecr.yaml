@@ -1,0 +1,86 @@
+Description: >
+  CloudFormation template for creating AWS CodeCommit repository and ECR repository to store cicd java eks code
+
+Parameters:
+  CodeCommitRepositoryName:
+    Type: String
+    Description: Name of AWS CodeCommit repo to be created
+  CodeCommitRepositoryBranchName:
+    Type: String
+    Default: main
+    Description: Default Branch
+  CodeCommitRepositoryS3Bucket:
+    Type: String
+    Description: Name of S3 Bucket where zip file of initial code will be stored
+  CodeCommitRepositoryS3BucketObjKey:
+    Type: String
+    Description: S3 ObjectKey, example-if intial code zip file is stored inside S3 bucket in this location code/cicdstack.zip, then this will be value
+  ECRRepositoryName:
+    Type: String
+    Description: Name of ECR repo to be created
+
+Resources:
+  MyRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Ref CodeCommitRepositoryName
+      RepositoryDescription: This is a repository for my project with code from CodeCommitRepositoryS3Bucket.
+      Code:
+        BranchName: !Ref CodeCommitRepositoryBranchName
+        S3: 
+          Bucket: !Ref CodeCommitRepositoryS3Bucket
+          Key: !Ref CodeCommitRepositoryS3BucketObjKey
+
+  DockerRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: "KMS"
+      LifecyclePolicy: 
+       LifecyclePolicyText: |
+         {
+            "rules": [
+                {
+                   "rulePriority": 2,
+                   "description": "Expire images older than 14 days",
+                   "selection": {
+                       "tagStatus": "any",
+                       "countType": "sinceImagePushed",
+                       "countUnit": "days",
+                       "countNumber": 14
+                    },
+                    "action": {
+                        "type": "expire"
+                    }
+                },
+                {
+                   "rulePriority": 1,
+                   "description": "Keep only one untagged image, expire all others",
+                   "selection": {
+                       "tagStatus": "untagged",
+                       "countType": "imageCountMoreThan",
+                       "countNumber": 1
+                   },
+                   "action": {
+                       "type": "expire"
+                   }
+                }
+           ]
+         }
+      
+      RepositoryName: !Ref ECRRepositoryName
+
+Outputs:
+  CodeCommitRepoUrl:
+    Value:
+      Fn::Join:
+        - ""
+        - - "https://console.aws.amazon.com/codecommit/repositories/home?region="
+          - Ref: AWS::Region
+          - "#/view/"
+          - Ref: MyRepo
+  ECRUrl:
+    Value: !Sub https://console.aws.amazon.com/ecr/repositories/private/${AWS::AccountId}/${DockerRepo}?region=${AWS::Region}
