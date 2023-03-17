@@ -1,7 +1,7 @@
 ---
 AWSTemplateFormatVersion: 2010-09-09
 
-Description: CFN Template to deploy CodePipeline to build Docker Image of java application and push to ECR and deploy to EKS
+Description: CFN Template to deploy CodePipeline to build Docker Image of java application and push to ECR and deploy to EKS following DevSecOps Practices
 
 Parameters:
   SourceRepoName:
@@ -27,7 +27,7 @@ Parameters:
     Description: ECR Docker Repositry Name
   EmailRecipient:
     Type: String
-    Default: mahrag@amazon.com
+    Default: user@domain.com
     Description: Email Address for Build Notifications
   EKSWorkerNodeRoleName:
     Type: CommaDelimitedList
@@ -50,6 +50,7 @@ Resources:
     Properties:
       Name: !Ref SourceRepoName
       Type: CodeCommit
+      BucketName: !Ref CodeGuruReviewerBucket
 
   MyProfilingGroup:
     Type: AWS::CodeGuruProfiler::ProfilingGroup
@@ -249,6 +250,13 @@ Resources:
   CodePipelineArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
+      PublicAccessBlockConfiguration:
+        IgnorePublicAcls: true
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
       LoggingConfiguration:
         DestinationBucketName: !Ref LoggingBucket
         LogFilePrefix: codeartifact-logs
@@ -259,9 +267,37 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
 
+  CodeGuruReviewerBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub codeguru-reviewer-cli-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        IgnorePublicAcls: true
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: codegurureviewer-logs
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: AES256
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
   LoggingBucket:
     Type: AWS::S3::Bucket
     Properties:
+      PublicAccessBlockConfiguration:
+        IgnorePublicAcls: true
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
       AccessControl: LogDeliveryWrite
       BucketEncryption:
         ServerSideEncryptionConfiguration:
@@ -270,7 +306,7 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
 
-  S3BucketPolicy:
+  CodePipeineBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
       Bucket: !Ref CodePipelineArtifactBucket
@@ -283,8 +319,29 @@ Resources:
               - s3:GetBucketVersioning
             Effect: Allow
             Resource:
-              - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}
-              - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+              - !Sub arn:${AWS::Partition}:s3:::${CodePipelineArtifactBucket}
+              - !Sub arn:${AWS::Partition}:s3:::${CodePipelineArtifactBucket}/*
+            Principal:
+              AWS:
+                - !GetAtt [CodePipelineServiceRole,Arn]
+                - !GetAtt [CodeBuildServiceRole,Arn]
+                - !GetAtt [EksCodeBuildkubeRole,Arn]
+
+  CodeReviewerBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CodeGuruReviewerBucket
+      PolicyDocument:
+        Statement:
+          - Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:GetBucketVersioning
+            Effect: Allow
+            Resource:
+              - !Sub arn:${AWS::Partition}:s3:::${CodeGuruReviewerBucket}
+              - !Sub arn:${AWS::Partition}:s3:::${CodeGuruReviewerBucket}/*
             Principal:
               AWS:
                 - !GetAtt [CodePipelineServiceRole,Arn]
@@ -301,14 +358,16 @@ Resources:
               - s3:PutObject
             Effect: Allow
             Resource:
-              - !Sub arn:aws:s3:::${LoggingBucket}
-              - !Sub arn:aws:s3:::${LoggingBucket}/codeartifact-logs/*
+              - !Sub arn:${AWS::Partition}:s3:::${LoggingBucket}
+              - !Sub arn:${AWS::Partition}:s3:::${LoggingBucket}/codeartifact-logs/*
+              - !Sub arn:${AWS::Partition}:s3:::${LoggingBucket}/codegurureviewer-logs/*
             Principal:
               Service: logging.s3.amazonaws.com
             Condition:
               ArnLike:
                 'aws:SourceArn':
-                  - !Sub arn:aws:s3:::${CodePipelineArtifactBucket}
+                  - !Sub arn:${AWS::Partition}:s3:::${CodePipelineArtifactBucket}
+                  - !Sub arn:${AWS::Partition}:s3:::${CodeGuruReviewerBucket}
               StringEquals:
                 'aws:SourceAccount':
                   - !Sub ${AWS::AccountId}
@@ -346,7 +405,7 @@ Resources:
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              - Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepoName}
+              - Resource: !Sub arn:${AWS::Partition}:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepoName}
                 Effect: Allow
                 Action:
                   - codecommit:GetBranch
@@ -357,8 +416,9 @@ Resources:
                   - codecommit:GetUploadArchiveStatus
                   - codecommit:CancelUploadArchive
               - Resource:
-                  - !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CodeBuildImageProject}
-                  - !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CodeDeployImageProject}
+                  - !Sub arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CodeBuildImageProject}
+                  - !Sub arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CodeDeployImageProject}
+                  - !Sub arn:${AWS::Partition}:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CodeSecScanProject}
                 Effect: Allow
                 Action:
                   - codebuild:StartBuild
@@ -372,7 +432,8 @@ Resources:
                   - codeguru-reviewer:Describe*
                   - codeguru-reviewer:Get*
                   - codeguru:Get*
-              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepository}
+                  - codeguru-reviewer:CreateCodeReview
+              - Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepository}
                 Effect: Allow
                 Action:
                   - ecr:DescribeImages
@@ -396,7 +457,11 @@ Resources:
                   - cloudwatch:DescribeAlarmsForMetric
                   - iam:GenerateCredentialReport
                   - iam:GetCredentialReport
-              - Resource: !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+              - Resource: !Sub arn:${AWS::Partition}:securityhub:${AWS::Region}::product/aquasecurity/aquasecurity
+                Effect: Allow
+                Action:
+                  - securityhub:BatchImportFindings
+              - Resource: !Sub arn:${AWS::Partition}:s3:::${CodePipelineArtifactBucket}/*
                 Effect: Allow
                 Action:
                   - s3:PutObject
@@ -433,6 +498,7 @@ Resources:
                   - securityhub:Get*
                   - securityhub:List*
                   - securityhub:Describe*
+                  - securityhub:BatchImportFindings
                   - config:DescribeConfigurationRecorders
                   - config:DescribeConfigurationRecorderStatus
                   - config:DescribeConfigRules
@@ -447,7 +513,7 @@ Resources:
                   - cloudwatch:DescribeAlarmsForMetric
                   - iam:GenerateCredentialReport
                   - iam:GetCredentialReport
-              - Resource: !Sub arn:aws:securityhub:${AWS::Region}::product/aquasecurity/aquasecurity
+              - Resource: !Sub arn:${AWS::Partition}:securityhub:${AWS::Region}::product/aquasecurity/aquasecurity
                 Effect: Allow
                 Action:
                   - securityhub:BatchImportFindings
@@ -461,32 +527,49 @@ Resources:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-              - Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepoName}
+              - Resource: !Sub arn:${AWS::Partition}:codecommit:${AWS::Region}:${AWS::AccountId}:${SourceRepoName}
                 Effect: Allow
                 Action:
                   - codecommit:GitPull
-              - Resource: !GetAtt SourceRepositoryAssociation.AssociationArn
+                  - codecommit:TagResource
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codeguru-reviewer:AssociateRepository
+              - Resource: 
+                  - !GetAtt SourceRepositoryAssociation.AssociationArn
+                  - !Sub arn:${AWS::Partition}:codeguru-reviewer:${AWS::Region}:${AWS::AccountId}:*
                 Effect: Allow
                 Action:
                   - codeguru-reviewer:List*
                   - codeguru-reviewer:Describe*
                   - codeguru-reviewer:Get*
                   - codeguru:Get*
-              - Resource: !Sub arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EKSClusterName}
+                  - codeguru-reviewer:CreateCodeReview
+              - Resource: !Sub arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EKSClusterName}
                 Effect: Allow
                 Action:
                   - eks:DescribeNodegroup
                   - eks:DescribeUpdate
                   - eks:DescribeCluster
-              - Resource: !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
+              - Resource: 
+                  - !Sub arn:${AWS::Partition}:s3:::${CodePipelineArtifactBucket}
+                  - !Sub arn:${AWS::Partition}:s3:::${CodeGuruReviewerBucket}
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+              - Resource: 
+                  - !Sub arn:${AWS::Partition}:s3:::${CodePipelineArtifactBucket}/*
+                  - !Sub arn:${AWS::Partition}:s3:::${CodeGuruReviewerBucket}/*
                 Effect: Allow
                 Action:
                   - s3:GetObject
+                  - s3:GetObjectAcl
                   - s3:PutObject
                   - s3:GetObjectVersion
                   - s3:GetBucketAcl
                   - s3:GetBucketLocation
-              - Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepository}
+              - Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrDockerRepository}
                 Effect: Allow
                 Action:
                   - ecr:GetDownloadUrlForLayer
@@ -512,19 +595,50 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              AWS: !Sub arn:aws:iam::${AWS::AccountId}:role/service-role/${CodeBuildServiceRole}
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/service-role/${CodeBuildServiceRole}
             Action: sts:AssumeRole
       Policies:
         - PolicyName: codebuild-eks-access
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              - Resource: !Sub arn:aws:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EKSClusterName}
+              - Resource: !Sub arn:${AWS::Partition}:eks:${AWS::Region}:${AWS::AccountId}:cluster/${EKSClusterName}
                 Effect: Allow
                 Action:
                   - eks:DescribeNodegroup
                   - eks:DescribeUpdate
                   - eks:DescribeCluster
+
+  CodeSecScanProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Location:
+          Fn::Sub: https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${SourceRepoName}
+        Type: CODEPIPELINE
+        BuildSpec: "buildspec/buildspec_secscan.yaml"
+      TimeoutInMinutes: 30
+      EncryptionKey: alias/aws/s3
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: "aws/codebuild/standard:5.0"
+        PrivilegedMode: True
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: CG_REVIEWER_BUCKET_NAME
+            Value: !Ref CodeGuruReviewerBucket
+          - Name: EKS_CODEBUILD_APP_NAME
+            Value: !Ref EKSCodeBuildAppName
+      Name:
+        Fn::Sub: SecScan-${AWS::StackName}
+      ServiceRole:
+        Fn::GetAtt: [ CodeBuildServiceRole, Arn ]
 
   CodeBuildImageProject:
     Type: AWS::CodeBuild::Project
@@ -541,7 +655,7 @@ Resources:
       Environment:
         ComputeType: BUILD_GENERAL1_SMALL
         Type: LINUX_CONTAINER
-        Image: "aws/codebuild/standard:4.0"
+        Image: "aws/codebuild/standard:5.0"
         PrivilegedMode: True
         EnvironmentVariables:
           - Name: AWS_DEFAULT_REGION
@@ -572,7 +686,7 @@ Resources:
       Environment:
         ComputeType: BUILD_GENERAL1_SMALL
         Type: LINUX_CONTAINER
-        Image: "aws/codebuild/standard:4.0"
+        Image: "aws/codebuild/standard:5.0"
         PrivilegedMode: True
         EnvironmentVariables:
           - Name: AWS_DEFAULT_REGION
@@ -615,11 +729,27 @@ Resources:
                 Provider: CodeCommit
               Configuration:
                 BranchName: !Ref CodeBranchName
+                OutputArtifactFormat: CODEBUILD_CLONE_REF
                 RepositoryName:
                   Ref: SourceRepoName
               OutputArtifacts:
                 - Name: SourceCodeApp
               RunOrder: 1
+        - Name: CodeSecurityScan
+          Actions:
+            - Name: SecScan
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeSecScanProject
+              InputArtifacts:
+                - Name: SourceCodeApp
+              OutputArtifacts:
+                - Name: SecScanOutput
+              RunOrder: 2
         - Name: Build
           Actions:
             - Name: Build
@@ -634,7 +764,7 @@ Resources:
                 - Name: SourceCodeApp
               OutputArtifacts:
                 - Name: BuildOutput
-              RunOrder: 2
+              RunOrder: 3
         - Name: ApprovalToDeploy
           Actions:
             - Name: Approval
@@ -647,7 +777,7 @@ Resources:
                 CustomData: Approval or Reject the build to be deployed on EKS
               InputArtifacts: []
               OutputArtifacts: []
-              RunOrder: 3
+              RunOrder: 4
         - Name: Deploy
           Actions:
             - Name: Deploy
@@ -662,7 +792,7 @@ Resources:
                 - Name: SourceCodeApp
               OutputArtifacts:
                 - Name: DeployOutput
-              RunOrder: 4
+              RunOrder: 5
     DependsOn: [ "BuildPipelineSNSTopic", "BuildPipelineSNSSubscription" ]
 
 Outputs:

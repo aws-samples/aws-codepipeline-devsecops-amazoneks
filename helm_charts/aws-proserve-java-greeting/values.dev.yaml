@@ -41,6 +41,8 @@ service:
   port: 80
   targetPort: 8080
   path: /hello
+  initialDelaySeconds: 60
+  periodSeconds: 30
 
 ingress:
   enabled: false

@@ -34,15 +34,17 @@ Resources:
   DockerRepo:
     Type: AWS::ECR::Repository
     Properties:
-      ImageTagMutability: MUTABLE
+      ImageTagMutability: IMMUTABLE
       ImageScanningConfiguration:
         ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: "KMS"
       LifecyclePolicy: 
        LifecyclePolicyText: |
          {
             "rules": [
                 {
-                   "rulePriority": 1,
+                   "rulePriority": 2,
                    "description": "Expire images older than 14 days",
                    "selection": {
                        "tagStatus": "any",
@@ -53,6 +55,18 @@ Resources:
                     "action": {
                         "type": "expire"
                     }
+                },
+                {
+                   "rulePriority": 1,
+                   "description": "Keep only one untagged image, expire all others",
+                   "selection": {
+                       "tagStatus": "untagged",
+                       "countType": "imageCountMoreThan",
+                       "countNumber": 1
+                   },
+                   "action": {
+                       "type": "expire"
+                   }
                 }
            ]
          }

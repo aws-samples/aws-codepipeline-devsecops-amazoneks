@@ -41,6 +41,8 @@ spec:
             httpGet:
               path: "{{ .Values.service.path }}"
               port: http
+            initialDelaySeconds: {{ .Values.service.initialDelaySeconds }}
+            periodSeconds: {{ .Values.service.periodSeconds }}
           readinessProbe:
             httpGet:
               path: "{{ .Values.service.path }}"
