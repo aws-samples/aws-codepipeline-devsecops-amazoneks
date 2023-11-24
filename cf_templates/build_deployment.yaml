@@ -296,6 +296,9 @@ Resources:
         BlockPublicAcls: true
         BlockPublicPolicy: true
         RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: ObjectWriter
       VersioningConfiguration:
         Status: Enabled
       AccessControl: LogDeliveryWrite
